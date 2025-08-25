@@ -1,0 +1,12 @@
+[server]
+headless = true
+port = 8501
+
+[client]
+toolbarMode = "viewer"
+
+[theme]
+base = "light"
+
+[ui]
+wideMode = true
