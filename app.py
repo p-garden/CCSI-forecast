@@ -69,7 +69,6 @@ def _load_category_csv(path: str) -> pd.DataFrame:
 # --------------------------
 st.set_page_config(page_title="CCSI Storytelling Dashboard", page_icon="📈", layout="wide")
 st.title("📈 CCSI 예측 스토리텔링 대시보드")
-st.caption("파일 업로드 없이 Step 1에서 즉시 인터랙티브 데모 그래프가 나타납니다.")
 
 # --------------------------
 # 사이드바 (분석 설정)
