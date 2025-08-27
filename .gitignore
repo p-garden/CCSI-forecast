@@ -9,3 +9,4 @@ __pycache__/
 .streamlit/
 .devcontainer/
 *.ipynb
+source/*

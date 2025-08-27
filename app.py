@@ -79,7 +79,7 @@ date_end   = st.sidebar.date_input("종료일", value=datetime(2025,6,1))
 
 # 기본값 설정 (CSV 결과 사용 모드)
 use_results = True
-results_path = "results/ccsi_prediction_vs_actual.csv"
+results_path = "results/ccsi_total.csv"
 
 # --------------------------
 # 탭 구성
@@ -316,88 +316,137 @@ with tabs[2]:
     
 
 # --------------------------
-# Step 3: 소분류 예측
+# Step 3: 대분류 예측 (9개 + 전체 성능)
 # --------------------------
 with tabs[3]:
-    st.subheader("소분류별 소비액 예측 (대분류 → 소분류)")
-    cat_path2 = st.text_input("소분류 CSV 경로 (같은 파일 가능)", value="data/consumption_by_category.csv", key="cat2")
+    st.subheader("대분류별 CCSI 예측 (9개) 및 전체 성능")
+
+    # CSV 로드: 고정 파일명만 사용
     try:
-        cat2_df = _load_category_csv(cat_path2)
-    except Exception as e:
-        st.warning(f"소비액 CSV 로드 실패: {e}")
+        df_l1 = pd.read_csv("results/ccsi_firstgrade.csv")
+    except Exception:
+        st.error("CSV를 찾을 수 없습니다. 프로젝트 폴더의 'ccsi_firstgrade.csv'를 확인해주세요.")
         st.stop()
 
-    req_cols2 = {"category_l1", "category_l2", "amount", "amount_pred"}
-    if not req_cols2.issubset(cat2_df.columns):
-        st.error("필수 컬럼이 없습니다. (category_l1, category_l2, amount, amount_pred)")
+    # 날짜 파싱: time(YYYY-MM) 또는 date 허용
+    if "date" in df_l1.columns:
+        try:
+            df_l1["date"] = pd.to_datetime(df_l1["date"], errors="coerce")
+        except Exception:
+            df_l1["date"] = pd.to_datetime(df_l1["date"].astype(str), errors="coerce")
+    elif "time" in df_l1.columns:
+        df_l1["date"] = pd.to_datetime(df_l1["time"], format="%Y-%m", errors="coerce")
+    else:
+        st.error("CSV에는 'time'(YYYY-MM) 또는 'date' 컬럼이 필요합니다.")
         st.stop()
 
-    # 기간 필터
-    m2 = (cat2_df["date"] >= pd.to_datetime(date_start)) & (cat2_df["date"] <= pd.to_datetime(date_end))
-    cat2_v = cat2_df.loc[m2].copy()
+    # 필수 컬럼 확인: category_l1, y_true, y_pred
+    req_cols_l1 = {"category_l1", "y_true", "y_pred"}
+    if not req_cols_l1.issubset(df_l1.columns):
+        # 👉 WIDE 형식 감지: 'CCSI'와 '*_pred' 계열 열이 있으면 LONG 변환 시도
+        pred_cols = [c for c in df_l1.columns if c.endswith("_pred_MA3") or c.endswith("_pred")]
+        if ("CCSI" in df_l1.columns) and len(pred_cols) > 0:
+            # id_vars 구성 (존재하는 컬럼만)
+            id_vars = [c for c in ["time", "date", "CCSI"] if c in df_l1.columns]
+            # wide → long
+            df_l1 = df_l1.melt(
+                id_vars=id_vars,
+                value_vars=pred_cols,
+                var_name="category_l1",
+                value_name="y_pred"
+            )
+            # 실제값 컬럼명 표준화
+            if "CCSI" in df_l1.columns and "y_true" not in df_l1.columns:
+                df_l1 = df_l1.rename(columns={"CCSI": "y_true"})
+            # 대분류명에서 접미어 제거
+            df_l1["category_l1"] = (
+                df_l1["category_l1"]
+                .str.replace("_pred_MA3", "", regex=False)
+                .str.replace("_pred", "", regex=False)
+            )
+        else:
+            st.error("필수 컬럼이 없습니다. (category_l1, y_true, y_pred) 또는 WIDE 형식(‘CCSI’ + '*_pred*')이 아닙니다.")
+            st.stop()
 
-    # 대분류 선택 → 소분류 선택
-    l1_opts = sorted(cat2_v["category_l1"].dropna().unique().tolist())
-    if not l1_opts:
-        st.warning("선택 가능한 대분류가 없습니다.")
+    # 기간 필터(사이드바) 적용
+    try:
+        start_d = pd.to_datetime(date_start)
+        end_d = pd.to_datetime(date_end)
+    except Exception:
+        start_d = df_l1["date"].min()
+        end_d = df_l1["date"].max()
+    m_l1 = (df_l1["date"] >= start_d) & (df_l1["date"] <= end_d)
+    df_l1 = df_l1.loc[m_l1].copy()
+
+    # 전체(모든 대분류 합친 관측치) 기준 성능 지표
+    overall_rmse = _rmse(df_l1["y_true"], df_l1["y_pred"])
+    overall_mae  = _mae(df_l1["y_true"], df_l1["y_pred"])
+    overall_mape = _mape(df_l1["y_true"], df_l1["y_pred"])
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("전체 RMSE", f"{overall_rmse:.2f}")
+    c2.metric("전체 MAE", f"{overall_mae:.2f}")
+    c3.metric("전체 MAPE(%)", f"{overall_mape:.1f}%")
+
+    st.divider()
+
+    # 대분류 선택 UI
+    l1_list = sorted(df_l1["category_l1"].dropna().unique().tolist())
+    if not l1_list:
+        st.warning("대분류(category_l1) 값이 없습니다.")
         st.stop()
-    l1_pick = st.selectbox("대분류 선택", l1_opts)
-    sub_l1 = cat2_v[cat2_v["category_l1"] == l1_pick].copy()
 
-    l2_opts = sorted(sub_l1["category_l2"].dropna().unique().tolist())
-    if not l2_opts:
-        st.warning("선택 가능한 소분류가 없습니다.")
-        st.stop()
-    l2_pick = st.selectbox("소분류 선택", l2_opts)
+    pick = st.selectbox("대분류 선택 (9개)", l1_list)
 
-    sub2 = sub_l1[sub_l1["category_l2"] == l2_pick].copy()
+    sub_l1 = df_l1[df_l1["category_l1"] == pick].copy()
 
-    # 지표
-    rmse2 = _rmse(sub2["amount"], sub2["amount_pred"])
-    mae2  = _mae(sub2["amount"], sub2["amount_pred"])
-    mape2 = _mape(sub2["amount"], sub2["amount_pred"])
+    # 선택한 대분류 성능
+    l1_rmse = _rmse(sub_l1["y_true"], sub_l1["y_pred"])
+    l1_mae  = _mae(sub_l1["y_true"], sub_l1["y_pred"])
+    l1_mape = _mape(sub_l1["y_true"], sub_l1["y_pred"])
 
-    c1,c2,c3 = st.columns(3)
-    c1.metric("RMSE", f"{rmse2:.2f}")
-    c2.metric("MAE", f"{mae2:.2f}")
-    c3.metric("MAPE(%)", f"{mape2:.1f}%")
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"[{pick}] RMSE", f"{l1_rmse:.2f}")
+    c2.metric(f"[{pick}] MAE", f"{l1_mae:.2f}")
+    c3.metric(f"[{pick}] MAPE(%)", f"{l1_mape:.1f}%")
 
-    # 라인 차트 (Hover: 실제/예측/오차/날짜)
-    plot_df2 = sub2.rename(columns={"amount":"Actual", "amount_pred":"Pred"})[["date","Actual","Pred"]]
-    plot_df2_m = plot_df2.melt("date", var_name="series", value_name="value")
+    # 라인 차트 (선택한 대분류: 실제 vs 예측)
+    plot_df_l1 = sub_l1.rename(columns={"y_true":"Actual", "y_pred":"Pred"})[["date","Actual","Pred"]]
+    plot_df_l1_m = plot_df_l1.melt("date", var_name="series", value_name="value")
 
     if HAS_PLOTLY:
-        import plotly.express as px
-        fig2 = px.line(plot_df2_m, x="date", y="value", color="series", title=f"[{l1_pick} / {l2_pick}] Actual vs Pred (소분류)")
-        fig2.update_traces(mode="lines+markers")
-        merged2 = sub2[["date","amount","amount_pred"]].copy()
-        merged2["error"] = merged2["amount_pred"] - merged2["amount"]
-        fig2.for_each_trace(
+        fig_l1 = px.line(plot_df_l1_m, x="date", y="value", color="series", title=f"[{pick}] Actual vs Pred (대분류)")
+        fig_l1.update_traces(mode="lines+markers")
+        merged_l1 = sub_l1[["date","y_true","y_pred"]].copy()
+        merged_l1["error"] = merged_l1["y_pred"] - merged_l1["y_true"]
+        fig_l1.for_each_trace(
             lambda tr: tr.update(
-                customdata=merged2[["error"]].values,
+                customdata=merged_l1[["error"]].values,
                 hovertemplate=("실제:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
             ) if tr.name == "Actual" else tr.update(
-                customdata=merged2[["error"]].values,
+                customdata=merged_l1[["error"]].values,
                 hovertemplate=("예측:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
             )
         )
-        fig2.update_xaxes(dtick="M1", tickformat="%Y-%m")
-        st.plotly_chart(fig2, use_container_width=True)
+        fig_l1.update_xaxes(dtick="M1", tickformat="%Y-%m")
+        st.plotly_chart(fig_l1, use_container_width=True)
     else:
-        line_chart(plot_df2_m, x="date", y="value", color="series", title=f"[{l1_pick} / {l2_pick}] Actual vs Pred (소분류)")
+        line_chart(plot_df_l1_m, x="date", y="value", color="series", title=f"[{pick}] Actual vs Pred (대분류)")
 
     st.divider()
-    st.markdown(f"**[{l1_pick}] 소분류별 성능 비교**")
-    rows2 = []
-    for g, df_g in sub_l1.groupby("category_l2"):
-        rows2.append({
-            "category_l2": g,
-            "RMSE": _rmse(df_g["amount"], df_g["amount_pred"]),
-            "MAE":  _mae(df_g["amount"], df_g["amount_pred"]),
-            "MAPE(%)": _mape(df_g["amount"], df_g["amount_pred"]),
+
+    # 9개 대분류 성능 테이블
+    rows_l1 = []
+    for g, df_g in df_l1.groupby("category_l1"):
+        rows_l1.append({
+            "category_l1": g,
+            "RMSE": _rmse(df_g["y_true"], df_g["y_pred"]),
+            "MAE":  _mae(df_g["y_true"], df_g["y_pred"]),
+            "MAPE(%)": _mape(df_g["y_true"], df_g["y_pred"]),
         })
-    comp2 = pd.DataFrame(rows2).sort_values("RMSE")
-    st.dataframe(comp2, use_container_width=True)
+    comp_l1 = pd.DataFrame(rows_l1).sort_values("RMSE")
+    st.markdown("**대분류별 성능 비교 (9개)**")
+    st.dataframe(comp_l1, use_container_width=True)
 
 # --------------------------
 # 나머지 탭: 데이터 연결 전까지 안내만
