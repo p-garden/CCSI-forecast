@@ -624,51 +624,61 @@ with tabs[4]:
 
     st.divider()
 
-    # 5) 선택바
-    use_sheet = "sheet_name" in df_l2.columns
-    if use_sheet:
-        # 시트명에서 _ 이후 접미어(RMSE 등) 제거, 'A>B'를 'A > B'로 표기
-        sheet_list = sorted(df_l2["sheet_name"].dropna().unique().tolist())
-        if not sheet_list:
-            st.warning("시트(sheet_name) 목록이 비어 있습니다.")
-            st.stop()
-        def clean_sheet_label(sheet):
-            s = str(sheet).strip()
-            # 1) '_' 이후 접미어(RMSE 등) 제거
-            if "_" in s:
-                s = s.split("_", 1)[0].strip()
-            # 2) '대분류>소분류' 형태를 보기 좋게
-            if ">" in s:
-                a, b = s.split(">", 1)
-                return f"{a.strip()} > {b.strip()}"
-            return s
-        sheet_labels = [clean_sheet_label(s) for s in sheet_list]
-        label_to_sheet = dict(zip(sheet_labels, sheet_list))
-        pick_label = st.selectbox("소분류 선택", sheet_labels)
-        pick_sheet = label_to_sheet[pick_label]
-        sub_l2 = df_l2[df_l2["sheet_name"] == pick_sheet].copy()
-        # 제목 표기를 위해 정제된 label 사용
-        clean_title = clean_sheet_label(pick_sheet)
-        if ">" in clean_title:
-            a, b = clean_title.split(">", 1)
-            disp_l1, disp_l2 = a.strip(), b.strip()
-        else:
-            disp_l1, disp_l2 = "", clean_title.strip()
-        display_title = f"[{disp_l1} > {disp_l2}]" if disp_l1 else f"[{disp_l2}]"
+    # 5) 선택바 — 대분류 ▶ 소분류 (명시적 매핑 사용)
+    #    사용자가 제공한 대분류↔소분류 매핑으로 UI를 고정합니다.
+    L1_TO_L2 = {
+        "공공/기업/단체": ["공공기관", "기업", "단체", "종교"],
+        "공연/전시": ["전시장", "공연관람", "문화서비스"],
+        "미디어/통신": ["기타결제", "시스템/통신"],
+        "생활서비스": ["광고/인쇄/인화", "미용서비스", "사우나/휴게시설", "수리서비스", "차량관리/서비스", "연료판매",
+                    "세탁/가사서비스", "무점포서비스", "회비/공과금", "전문서비스", "여행/유학대행", "보안/운송", "부동산",
+                    "렌탈서비스", "가례서비스", "금융상품/서비스"],
+        "소매/유통": ["건강/기호식품", "선물/완구", "스포츠/레져용품", "음/식료품소매", "의복/의류", "인테리어/가정용품",
+                   "종합소매점", "화장품소매", "제조/도매", "사무/교육용품", "가전제품", "서적/도서", "차량관리/부품",
+                   "패션잡화", "악기/공예", "기타용품", "차량판매", "방문판매"],
+        "여가/오락": ["숙박", "일반스포츠", "취미/오락", "요가/단전/마사지"],
+        "음식": ["간이주점", "고기요리", "닭/오리요리", "별식/퓨전요리", "분식", "양식", "일식/수산물",
+               "제과/제빵/떡/케익", "중식", "커피/음료", "패스트푸드", "한식", "유흥주점", "부페",
+               "휴게소/대형업체", "음식배달서비스"],
+        "의료/건강": ["의약/의료품", "일반병원", "수의업", "특화병원", "종합병원", "기타의료"],
+        "학문/교육": ["독서실/고시원", "예체능계학원", "외국어학원", "유아교육", "입시학원", "기술/직업교육학원", "기타교육"],
+    }
+
+    pick_l1 = st.selectbox("대분류 선택", list(L1_TO_L2.keys()))
+    l2_candidates = L1_TO_L2.get(pick_l1, [])
+    pick_l2 = st.selectbox("소분류 선택", l2_candidates)
+
+    # 데이터에서 해당 조합을 찾기 (시트 이름 기준으로 소분류 매칭)
+    # 대분류 선택은 UI용이며, 실제 데이터 필터는 소분류(시트명)로만 수행
+    # sheet_name 형식 예: "소매/유통>건강/기호식품_RMSE3.80" 등
+    if "sheet_name" in df_l2.columns:
+        # 시트명에서 소분류명만 추출하여 보조 컬럼 생성
+        df_l2["__sheet_l2__"] = df_l2["sheet_name"].astype(str)
+        df_l2["__sheet_l2__"] = df_l2["__sheet_l2__"].str.split(">", n=1).str[-1]
+        # 뒤쪽 성능표기 접미사(예: _RMSE3.80, _MAE2.1 등) 제거
+        df_l2["__sheet_l2__"] = df_l2["__sheet_l2__"].str.replace(r"_.*$", "", regex=True).str.strip()
     else:
-        # 대분류 → 소분류 선택
-        l1_list = sorted(df_l2["category_l1"].dropna().unique().tolist())
-        if not l1_list:
-            st.warning("대분류(category_l1) 값이 없습니다.")
-            st.stop()
-        pick_l1 = st.selectbox("대분류 선택", l1_list)
-        l2_list = sorted(df_l2.loc[df_l2["category_l1"]==pick_l1, "category_l2"].dropna().unique().tolist())
-        if not l2_list:
-            st.warning(f"'{pick_l1}'에 소분류(category_l2)가 없습니다.")
-            st.stop()
-        pick_l2 = st.selectbox("소분류 선택", l2_list)
-        sub_l2 = df_l2[(df_l2["category_l1"]==pick_l1) & (df_l2["category_l2"]==pick_l2)].copy()
-        display_title = f"[{pick_l1} > {pick_l2}]"
+        # sheet_name이 없다면 category_l2를 사용 (가능한 경우)
+        base_col = "category_l2" if "category_l2" in df_l2.columns else None
+        if base_col is not None:
+            df_l2["__sheet_l2__"] = df_l2[base_col].astype(str)
+        else:
+            df_l2["__sheet_l2__"] = ""
+
+    # 1차: 정규화된 소분류명과 정확히 일치하는 행 필터
+    sub_l2 = df_l2[df_l2["__sheet_l2__"] == str(pick_l2)].copy()
+
+    # 2차 폴백: 시트명에 소분류 문자열이 포함되는 경우(대분류 무관)도 허용
+    if sub_l2.empty and ("sheet_name" in df_l2.columns):
+        mask = df_l2["sheet_name"].astype(str).str.contains(str(pick_l2), na=False)
+        sub_l2 = df_l2[mask].copy()
+
+    # 안전: 보조 컬럼은 이후 사용하지 않으므로 제거
+    if "__sheet_l2__" in df_l2.columns:
+        df_l2.drop(columns=["__sheet_l2__"], inplace=True)
+
+    # 그래프/지표 표기용 제목
+    display_title = f"[{pick_l1} > {pick_l2}]"
 
     # 6) 선택 조합 성능 지표 (간단 버전, RMSE/MAE/MAPE만)
     l2_rmse = _rmse(sub_l2["y_true"], sub_l2["y_pred"])
