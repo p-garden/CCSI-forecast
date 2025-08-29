@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from pathlib import Path
 
 # Plotly optional import (없어도 기본 차트로 폴백)
 try:
@@ -79,7 +80,7 @@ date_end   = st.sidebar.date_input("종료일", value=datetime(2025,6,1))
 
 # 기본값 설정 (CSV 결과 사용 모드)
 use_results = True
-results_path = "results/ccsi_total.csv"
+results_path = "results/ccsi_total2.csv"
 
 # --------------------------
 # 탭 구성
@@ -186,6 +187,9 @@ with tabs[1]:
             end_d = df["date"].max()
         mask = (df["date"] >= start_d) & (df["date"] <= end_d)
         df = df.loc[mask].copy()
+        # CCSI는 전체 구간 유지, 예측값은 2024-01 이후만 표시
+        cutoff = pd.to_datetime("2024-01-01")
+        df.loc[df["date"] < cutoff, "y_pred"] = np.nan
 
         # 지표 (필터 적용 후)
         rmse = _rmse(df["y_true"], df["y_pred"])
@@ -207,6 +211,10 @@ with tabs[1]:
             fig = px.line(plot_df_final, x="date", y="value", color="series", title="Actual vs. Pred (CCSI)")
             # 선+마커로 보기 좋게
             fig.update_traces(mode="lines+markers")
+            # Trace 색상 지정
+            fig.for_each_trace(
+                lambda tr: tr.update(line=dict(color="blue")) if tr.name == "Actual" else tr.update(line=dict(color="red"))
+            )
             # Hover 템플릿 한글 커스텀 with error
             merged = df[["date","y_true","y_pred"]].copy()
             merged["error"] = merged["y_pred"] - merged["y_true"]
@@ -306,7 +314,7 @@ with tabs[2]:
     st.latex(r"\text{TotalConsumption}_t = \sum_{k=1}^{K} \text{Cons}_{t}^{(k)}")
     st.caption("의미: 시점 t의 **전체 소비액**은 모든 업종 k의 소비액을 **합산**한 값입니다.")
     st.latex(r"\text{Cons}_{t}^{(k)} = f_k(\text{CCSI}_{t-\ell}, \text{Lag/Window}, \text{Seasonality}, \text{Exogenous})")
-    st.caption("의미: 업종 k의 소비액은 **과거 CCSI**, **Lag/Window 피처**, **계절성**, **외생 변수**를 입력으로 하는 모델 \(f_k\)로 **설명/예측**됩니다.")
+    st.caption(r"의미: 업종 k의 소비액은 **과거 CCSI**, **Lag/Window 피처**, **계절성**, **외생 변수**를 입력으로 하는 모델 \(f_k\)로 **설명/예측**됩니다.")
 
     st.markdown("### 평가 지표")
     c1,c2,c3 = st.columns(3)
@@ -377,6 +385,9 @@ with tabs[3]:
         end_d = df_l1["date"].max()
     m_l1 = (df_l1["date"] >= start_d) & (df_l1["date"] <= end_d)
     df_l1 = df_l1.loc[m_l1].copy()
+    # CCSI는 전체 구간 유지, 예측값은 2024-01 이후만 표시
+    cutoff = pd.to_datetime("2024-01-01")
+    df_l1.loc[df_l1["date"] < cutoff, "y_pred"] = np.nan
 
     # 전체(모든 대분류 합친 관측치) 기준 성능 지표
     overall_rmse = _rmse(df_l1["y_true"], df_l1["y_pred"])
@@ -417,6 +428,9 @@ with tabs[3]:
     if HAS_PLOTLY:
         fig_l1 = px.line(plot_df_l1_m, x="date", y="value", color="series", title=f"[{pick}] Actual vs Pred (대분류)")
         fig_l1.update_traces(mode="lines+markers")
+        fig_l1.for_each_trace(
+            lambda tr: tr.update(line=dict(color="blue")) if tr.name == "Actual" else tr.update(line=dict(color="red"))
+        )
         merged_l1 = sub_l1[["date","y_true","y_pred"]].copy()
         merged_l1["error"] = merged_l1["y_pred"] - merged_l1["y_true"]
         fig_l1.for_each_trace(
@@ -449,25 +463,461 @@ with tabs[3]:
     st.dataframe(comp_l1, use_container_width=True)
 
 # --------------------------
-# 나머지 탭: 데이터 연결 전까지 안내만
+# Step 4: 소분류 예측 (대분류→소분류 선택 + 전체 평균 지표)
 # --------------------------
 with tabs[4]:
     st.subheader("소분류 Drill-down & 예측")
-    st.write("대분류 선택 → 소분류 상세 예측을 표시합니다. (데이터 연결 후 활성화)")
-with tabs[5]:
-    st.subheader("성능 비교")
-    st.write("CCSI 단일 예측 vs (대분류/소분류) 예측 합산 성능 비교 표/그래프. (데이터 연결 후 활성화)")
-with tabs[6]:
-    st.subheader("결론 및 확장성")
-    st.markdown(
-        """
-        **핵심 결론**  
-        - 단일 CCSI 예측은 변동성과 구성요인 복잡성 때문에 오차가 큼  
-        - **소비액을 대분류→소분류로 세분화**하여 직접 예측하고 합산하면 설명력과 예측력이 개선  
 
-        **확장 제안**  
-        - 소분류별 리드-랙(lead-lag) 분석으로 선행성 탐색  
-        - 물가/금리/실업률 등 외생 변수 결합  
-        - 특수 이벤트(명절, 정책 등) 마커링 & 이상치 감지
-        """
+    # 0) 소분류 예측 파일 로드 (XLSX 고정)
+    sec_path = Path("results") / "ccsi_secgrade.xlsx"
+    try:
+        # 모든 시트를 읽어와 합칩니다 (시트=각 소분류 예측)
+        xls_all = pd.read_excel(sec_path, sheet_name=None)
+        frames = []
+        for sh_name, df_sh in xls_all.items():
+            if df_sh is None or len(df_sh) == 0:
+                continue
+            df_tmp = df_sh.copy()
+            # 각 시트 이름 보존 → 소분류 선택에 사용
+            df_tmp["sheet_name"] = str(sh_name)
+            frames.append(df_tmp)
+        if not frames:
+            raise ValueError("엑셀 파일에 유효한 시트가 없습니다.")
+        df_l2 = pd.concat(frames, axis=0, ignore_index=True)
+    except ImportError:
+        st.error("엑셀 파일을 읽기 위해 'openpyxl'이 필요합니다.\n가상환경에서 다음을 실행해주세요:\n\npip install openpyxl")
+        st.stop()
+    except FileNotFoundError:
+        st.error(f"소분류 예측 파일을 찾을 수 없습니다: '{sec_path}' 경로를 확인해주세요.")
+        st.stop()
+    except Exception as e:
+        st.error(f"소분류 예측 파일 로드 중 오류가 발생했습니다: {e}")
+        st.stop()
+
+    # 1) 날짜 파싱: time(YYYY-MM) 또는 date 허용
+    if "date" in df_l2.columns:
+        try:
+            df_l2["date"] = pd.to_datetime(df_l2["date"], errors="coerce")
+        except Exception:
+            df_l2["date"] = pd.to_datetime(df_l2["date"].astype(str), errors="coerce")
+    elif "time" in df_l2.columns:
+        df_l2["date"] = pd.to_datetime(df_l2["time"], format="%Y-%m", errors="coerce")
+    else:
+        # 날짜 컬럼이 없으면 생성 시도(무조건 실패 대비)
+        if "연월" in df_l2.columns:
+            df_l2["date"] = pd.to_datetime(df_l2["연월"].astype(str), format="%Y%m", errors="coerce")
+        else:
+            st.error("소분류 파일에는 'time'(YYYY-MM) 또는 'date' 컬럼이 필요합니다.")
+            st.stop()
+
+    # 2) 컬럼 정규화: category_l1, category_l2, y_true, y_pred가 없으면 wide→long 시도
+    req_cols_l2 = {"category_l1", "category_l2", "y_true", "y_pred"}
+    if not req_cols_l2.issubset(df_l2.columns):
+        # 후보 예측 컬럼 패턴
+        pred_cols = [c for c in df_l2.columns if c.endswith("_pred_MA3") or c.endswith("_pred")]
+        # 실제값 컬럼 후보
+        ytrue_col = "y_true" if "y_true" in df_l2.columns else ("CCSI" if "CCSI" in df_l2.columns else None)
+
+        if (ytrue_col is not None) and len(pred_cols) > 0:
+            # category_l1/l2 후보 식별
+            l1_col = "category_l1" if "category_l1" in df_l2.columns else None
+            l2_col = "category_l2" if "category_l2" in df_l2.columns else None
+
+            # melt 이후에도 시트 정보를 유지하기 위해 sheet_name을 id_vars에 포함
+            id_core = ["time", "date", ytrue_col, l1_col, l2_col, "sheet_name"]
+            id_vars = [c for c in id_core if c and c in df_l2.columns]
+
+            # 🔹 이미 한 쌍의 실제/예측 컬럼이 존재하면 melt를 생략하고 표준 컬럼명으로 정규화
+            # 실제값 후보
+            actual_candidates = [col for col in ["y_true", "y", "actual", "CCSI"] if col in df_l2.columns]
+            # 예측값 후보
+            pred_candidates = [col for col in ["y_pred", "pred", "yhat"] if col in df_l2.columns]
+
+            if actual_candidates and pred_candidates:
+                a_col = actual_candidates[0]
+                p_col = pred_candidates[0]
+                if "y_true" not in df_l2.columns and a_col != "y_true":
+                    df_l2 = df_l2.rename(columns={a_col: "y_true"})
+                if "y_pred" not in df_l2.columns and p_col != "y_pred":
+                    df_l2 = df_l2.rename(columns={p_col: "y_pred"})
+                # 여기서는 wide→long 불필요하므로 그대로 진행
+                pass
+            else:
+                # value_name 충돌 방지
+                val_name = "y_pred"
+                if val_name in df_l2.columns:
+                    val_name = "__y_pred_melt__"
+
+                df_l2 = df_l2.melt(
+                    id_vars=id_vars,
+                    value_vars=pred_cols,
+                    var_name="__pred_col__",
+                    value_name=val_name
+                )
+
+                # "__y_pred_melt__"로 생성된 경우 다시 y_pred로 표준화
+                if val_name != "y_pred":
+                    df_l2 = df_l2.rename(columns={val_name: "y_pred"})
+
+                # 컬럼명 표준화
+                df_l2 = df_l2.rename(columns={ytrue_col: "y_true"})
+                # 대분류/소분류가 없었다면 예측 컬럼명에서 유추할 수 있도록 기본값 설정
+                if "category_l1" not in df_l2.columns:
+                    df_l2["category_l1"] = "대분류"
+                if "category_l2" not in df_l2.columns:
+                    # 예: "음식_커피_pred_MA3" → l1="음식", l2="커피" 식으로 분해 시도
+                    parts = df_l2["__pred_col__"].str.replace("_pred_MA3","",regex=False)\
+                                                 .str.replace("_pred","",regex=False)\
+                                                 .str.split("_", n=1, expand=True)
+                    if isinstance(parts, pd.DataFrame) and parts.shape[1] == 2:
+                        df_l2["category_l1"] = parts[0]
+                        df_l2["category_l2"] = parts[1]
+                    else:
+                        df_l2["category_l2"] = df_l2["__pred_col__"].str.replace("_pred_MA3","",regex=False)\
+                                                                    .str.replace("_pred","",regex=False)
+                # 보조 컬럼 제거
+                if "__pred_col__" in df_l2.columns:
+                    df_l2 = df_l2.drop(columns=["__pred_col__"])
+        else:
+            st.error("소분류 파일에 (category_l1, category_l2, y_true, y_pred) 또는 WIDE 형식('*_pred*')이 필요합니다.")
+            st.stop()
+
+    # 시트명이 카테고리 정보인 경우 보완: 비어있거나 없는 category_l1/l2 채우기
+    if "sheet_name" in df_l2.columns:
+        if "category_l1" not in df_l2.columns:
+            df_l2["category_l1"] = df_l2["sheet_name"]
+        else:
+            df_l2["category_l1"] = df_l2["category_l1"].fillna(df_l2["sheet_name"])
+        if "category_l2" not in df_l2.columns:
+            df_l2["category_l2"] = df_l2["sheet_name"]
+        else:
+            df_l2["category_l2"] = df_l2["category_l2"].fillna(df_l2["sheet_name"])
+        # 시트명이 "대분류>소분류" 형태라면 분해 시도
+        parts_sheet = df_l2["sheet_name"].str.split(">", n=1, expand=True)
+        if isinstance(parts_sheet, pd.DataFrame) and parts_sheet.shape[1] == 2:
+            df_l2["category_l1"] = df_l2["category_l1"].fillna(parts_sheet[0])
+            df_l2["category_l2"] = df_l2["category_l2"].fillna(parts_sheet[1])
+        # sheet_name은 이후 선택 UI에 활용하므로 삭제하지 않음
+
+    # 3) 기간 필터 적용 (사이드바)
+    try:
+        start_d = pd.to_datetime(date_start)
+        end_d = pd.to_datetime(date_end)
+    except Exception:
+        start_d = df_l2["date"].min()
+        end_d = df_l2["date"].max()
+    m_l2 = (df_l2["date"] >= start_d) & (df_l2["date"] <= end_d)
+    df_l2 = df_l2.loc[m_l2].copy()
+    # CCSI는 전체 구간 유지, 예측값은 2024-01 이후만 표시
+    cutoff = pd.to_datetime("2024-01-01")
+    df_l2.loc[df_l2["date"] < cutoff, "y_pred"] = np.nan
+
+    # 4) 상단: 전체 평균 평가지표 (필터 후 전체)
+    overall_rmse = _rmse(df_l2["y_true"], df_l2["y_pred"])
+    overall_mae  = _mae(df_l2["y_true"], df_l2["y_pred"])
+    overall_mape = _mape(df_l2["y_true"], df_l2["y_pred"])
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("전체 RMSE", f"{overall_rmse:.2f}")
+    c2.metric("전체 MAE", f"{overall_mae:.2f}")
+    c3.metric("전체 MAPE(%)", f"{overall_mape:.1f}%")
+
+    st.divider()
+
+    # 5) 선택바
+    use_sheet = "sheet_name" in df_l2.columns
+    if use_sheet:
+        # 시트명에서 _ 이후 접미어(RMSE 등) 제거, 'A>B'를 'A > B'로 표기
+        sheet_list = sorted(df_l2["sheet_name"].dropna().unique().tolist())
+        if not sheet_list:
+            st.warning("시트(sheet_name) 목록이 비어 있습니다.")
+            st.stop()
+        def clean_sheet_label(sheet):
+            s = str(sheet).strip()
+            # 1) '_' 이후 접미어(RMSE 등) 제거
+            if "_" in s:
+                s = s.split("_", 1)[0].strip()
+            # 2) '대분류>소분류' 형태를 보기 좋게
+            if ">" in s:
+                a, b = s.split(">", 1)
+                return f"{a.strip()} > {b.strip()}"
+            return s
+        sheet_labels = [clean_sheet_label(s) for s in sheet_list]
+        label_to_sheet = dict(zip(sheet_labels, sheet_list))
+        pick_label = st.selectbox("소분류 선택", sheet_labels)
+        pick_sheet = label_to_sheet[pick_label]
+        sub_l2 = df_l2[df_l2["sheet_name"] == pick_sheet].copy()
+        # 제목 표기를 위해 정제된 label 사용
+        clean_title = clean_sheet_label(pick_sheet)
+        if ">" in clean_title:
+            a, b = clean_title.split(">", 1)
+            disp_l1, disp_l2 = a.strip(), b.strip()
+        else:
+            disp_l1, disp_l2 = "", clean_title.strip()
+        display_title = f"[{disp_l1} > {disp_l2}]" if disp_l1 else f"[{disp_l2}]"
+    else:
+        # 대분류 → 소분류 선택
+        l1_list = sorted(df_l2["category_l1"].dropna().unique().tolist())
+        if not l1_list:
+            st.warning("대분류(category_l1) 값이 없습니다.")
+            st.stop()
+        pick_l1 = st.selectbox("대분류 선택", l1_list)
+        l2_list = sorted(df_l2.loc[df_l2["category_l1"]==pick_l1, "category_l2"].dropna().unique().tolist())
+        if not l2_list:
+            st.warning(f"'{pick_l1}'에 소분류(category_l2)가 없습니다.")
+            st.stop()
+        pick_l2 = st.selectbox("소분류 선택", l2_list)
+        sub_l2 = df_l2[(df_l2["category_l1"]==pick_l1) & (df_l2["category_l2"]==pick_l2)].copy()
+        display_title = f"[{pick_l1} > {pick_l2}]"
+
+    # 6) 선택 조합 성능 지표 (간단 버전, RMSE/MAE/MAPE만)
+    l2_rmse = _rmse(sub_l2["y_true"], sub_l2["y_pred"])
+    l2_mae  = _mae(sub_l2["y_true"], sub_l2["y_pred"])
+    l2_mape = _mape(sub_l2["y_true"], sub_l2["y_pred"])
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("RMSE", f"{l2_rmse:.2f}")
+    c2.metric("MAE", f"{l2_mae:.2f}")
+    c3.metric("MAPE(%)", f"{l2_mape:.1f}%")
+
+    # 7) 라인 차트 (실제 vs 예측) — 항상 표시 (SHOW_L2_CHARTS 플래그 제거)
+    sub_l2_agg = (
+        sub_l2.groupby("date", as_index=False)
+              .agg(y_true=("y_true","mean"), y_pred=("y_pred","mean"))
+              .sort_values("date")
     )
+    plot_df_l2 = sub_l2_agg.rename(columns={"y_true":"Actual", "y_pred":"Pred"})[["date","Actual","Pred"]]
+    plot_df_l2_m = plot_df_l2.melt("date", var_name="series", value_name="value")
+
+    chart_title = f"{display_title} Actual vs Pred (소분류)"
+    if HAS_PLOTLY:
+        fig_l2 = px.line(plot_df_l2_m, x="date", y="value", color="series", title=chart_title)
+        fig_l2.update_traces(mode="lines+markers")
+        fig_l2.for_each_trace(
+            lambda tr: tr.update(line=dict(color="blue")) if tr.name == "Actual" else tr.update(line=dict(color="red"))
+        )
+        merged_l2 = sub_l2_agg.rename(columns={"y_true":"Actual","y_pred":"Pred"}).copy()
+        merged_l2["error"] = merged_l2["Pred"] - merged_l2["Actual"]
+        fig_l2.for_each_trace(
+            lambda tr: tr.update(
+                customdata=merged_l2[["error"]].values,
+                hovertemplate=("실제:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
+            ) if tr.name == "Actual" else tr.update(
+                customdata=merged_l2[["error"]].values,
+                hovertemplate=("예측:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
+            )
+        )
+        fig_l2.update_xaxes(dtick="M1", tickformat="%Y-%m")
+        st.plotly_chart(fig_l2, use_container_width=True)
+    else:
+        line_chart(plot_df_l2_m, x="date", y="value", color="series", title=chart_title)
+
+    st.divider()
+
+    # 8) (선택) 대분류 내 소분류들 성능 비교 표
+    if "sheet_name" in df_l2.columns:
+        # sheet_name: 표에서 대분류>소분류 형태라면 표기 정제
+        rows_l2 = []
+        for g, df_g in df_l2.groupby("sheet_name"):
+            # 표에 label도 정제해서 보여주기
+            if ">" in g:
+                parts = g.split(">", 1)
+                label = f"{parts[0].strip()} > {parts[1].strip()}"
+            elif "_" in g:
+                parts = g.split("_", 1)
+                label = f"{parts[0].strip()} > {parts[1].strip()}"
+            else:
+                label = g.strip()
+            rows_l2.append({
+                "분류": label,
+                "RMSE": _rmse(df_g["y_true"], df_g["y_pred"]),
+                "MAE":  _mae(df_g["y_true"], df_g["y_pred"]),
+                "MAPE(%)": _mape(df_g["y_true"], df_g["y_pred"]),
+            })
+        comp_l2 = pd.DataFrame(rows_l2).sort_values("RMSE")
+        st.markdown("**소분류별 성능 비교**")
+        st.dataframe(comp_l2, use_container_width=True)
+    else:
+        rows_l2 = []
+        for g, df_g in df_l2[df_l2["category_l1"]==pick_l1].groupby("category_l2"):
+            rows_l2.append({
+                "category_l2": g,
+                "RMSE": _rmse(df_g["y_true"], df_g["y_pred"]),
+                "MAE":  _mae(df_g["y_true"], df_g["y_pred"]),
+                "MAPE(%)": _mape(df_g["y_true"], df_g["y_pred"]),
+            })
+        comp_l2 = pd.DataFrame(rows_l2).sort_values("RMSE")
+        st.markdown(f"**[{pick_l1}] 소분류별 성능 비교**")
+        st.dataframe(comp_l2, use_container_width=True)
+with tabs[5]:
+    st.subheader("Step 5: 성능 비교 (Total vs 대분류 vs 소분류)")
+
+    cutoff = pd.to_datetime("2024-01-01")
+    # 공통 기간 필터
+    try:
+        start_d = pd.to_datetime(date_start)
+        end_d = pd.to_datetime(date_end)
+    except Exception:
+        start_d = pd.to_datetime("1900-01-01")
+        end_d = pd.to_datetime("2100-01-01")
+
+    # ----------------------------
+    # 1) Total (단일 CCSI 예측)
+    # ----------------------------
+    total_ok = False
+    try:
+        df_total = pd.read_csv(results_path)
+        if {"time","y_true","y_pred"}.issubset(df_total.columns):
+            df_total["date"] = pd.to_datetime(df_total["time"], format="%Y-%m", errors="coerce")
+            df_total = df_total.sort_values("date")
+            # 기간 필터
+            df_total = df_total[(df_total["date"] >= start_d) & (df_total["date"] <= end_d)].copy()
+            # 예측은 2024-01 이후만
+            df_total.loc[df_total["date"] < cutoff, "y_pred"] = np.nan
+            total_rmse = _rmse(df_total["y_true"], df_total["y_pred"])
+            total_mae  = _mae(df_total["y_true"], df_total["y_pred"])
+            total_mape = _mape(df_total["y_true"], df_total["y_pred"])
+            total_ok = True
+        else:
+            st.warning("Total 결과 파일(results/ccsi_total2.csv)의 형식이 올바르지 않습니다.")
+    except Exception as e:
+        st.warning(f"Total 결과 로드 실패: {e}")
+        total_rmse = total_mae = total_mape = np.nan
+
+    # ----------------------------
+    # 2) 대분류 (firstgrade)
+    # ----------------------------
+    l1_ok = False
+    try:
+        df_l1_cmp = pd.read_csv("results/ccsi_firstgrade.csv")
+        # 날짜
+        if "date" in df_l1_cmp.columns:
+            df_l1_cmp["date"] = pd.to_datetime(df_l1_cmp["date"], errors="coerce")
+        elif "time" in df_l1_cmp.columns:
+            df_l1_cmp["date"] = pd.to_datetime(df_l1_cmp["time"], format="%Y-%m", errors="coerce")
+        else:
+            raise ValueError("대분류 파일에 'time' 또는 'date' 컬럼이 필요합니다.")
+        # 형식 표준화 (wide → long 변환)
+        req_cols_l1 = {"category_l1","y_true","y_pred"}
+        if not req_cols_l1.issubset(df_l1_cmp.columns):
+            pred_cols = [c for c in df_l1_cmp.columns if c.endswith("_pred_MA3") or c.endswith("_pred")]
+            if ("CCSI" in df_l1_cmp.columns) and len(pred_cols) > 0:
+                id_vars = [c for c in ["time","date","CCSI"] if c in df_l1_cmp.columns]
+                df_l1_cmp = df_l1_cmp.melt(id_vars=id_vars, value_vars=pred_cols,
+                                           var_name="category_l1", value_name="y_pred")
+                df_l1_cmp = df_l1_cmp.rename(columns={"CCSI":"y_true"})
+                df_l1_cmp["category_l1"] = (
+                    df_l1_cmp["category_l1"]
+                    .str.replace("_pred_MA3","",regex=False)
+                    .str.replace("_pred","",regex=False)
+                )
+            else:
+                raise ValueError("대분류 파일 포맷이 예상과 다릅니다.")
+        # 기간 필터
+        df_l1_cmp = df_l1_cmp[(df_l1_cmp["date"] >= start_d) & (df_l1_cmp["date"] <= end_d)].copy()
+        # 예측 마스킹
+        df_l1_cmp.loc[df_l1_cmp["date"] < cutoff, "y_pred"] = np.nan
+        l1_rmse = _rmse(df_l1_cmp["y_true"], df_l1_cmp["y_pred"])
+        l1_mae  = _mae(df_l1_cmp["y_true"], df_l1_cmp["y_pred"])
+        l1_mape = _mape(df_l1_cmp["y_true"], df_l1_cmp["y_pred"])
+        l1_ok = True
+    except Exception as e:
+        st.warning(f"대분류 결과 로드 실패: {e}")
+        l1_rmse = l1_mae = l1_mape = np.nan
+
+    # ----------------------------
+    # 3) 소분류 (secgrade)
+    # ----------------------------
+    l2_ok = False
+    try:
+        sec_path = Path("results") / "ccsi_secgrade.xlsx"
+        xls_all = pd.read_excel(sec_path, sheet_name=None)
+        frames = []
+        for sh, df_sh in xls_all.items():
+            if df_sh is None or len(df_sh)==0:
+                continue
+            df_t = df_sh.copy()
+            # 날짜 파싱
+            if "date" in df_t.columns:
+                df_t["date"] = pd.to_datetime(df_t["date"], errors="coerce")
+            elif "time" in df_t.columns:
+                df_t["date"] = pd.to_datetime(df_t["time"], format="%Y-%m", errors="coerce")
+            else:
+                if "연월" in df_t.columns:
+                    df_t["date"] = pd.to_datetime(df_t["연월"].astype(str), format="%Y%m", errors="coerce")
+                else:
+                    continue
+            # 실제/예측 표준화
+            if "y_true" not in df_t.columns:
+                if "CCSI" in df_t.columns:
+                    df_t = df_t.rename(columns={"CCSI":"y_true"})
+            if "y_pred" not in df_t.columns:
+                pred_cols = [c for c in df_t.columns if c.endswith("_pred_MA3") or c.endswith("_pred")]
+                if len(pred_cols)==1:
+                    df_t = df_t.rename(columns={pred_cols[0]:"y_pred"})
+                elif len(pred_cols)>1:
+                    # 여러 예측컬럼이면 우선 첫 번째 사용 (간단비교 목적)
+                    df_t = df_t.rename(columns={pred_cols[0]:"y_pred"})
+                else:
+                    continue
+            df_t["sheet_name"] = str(sh)
+            frames.append(df_t[["date","y_true","y_pred","sheet_name"]])
+        if not frames:
+            raise ValueError("소분류 시트에서 유효한 데이터가 없습니다.")
+        df_l2_cmp = pd.concat(frames, ignore_index=True)
+        # 기간 필터
+        df_l2_cmp = df_l2_cmp[(df_l2_cmp["date"] >= start_d) & (df_l2_cmp["date"] <= end_d)].copy()
+        # 예측 마스킹
+        df_l2_cmp.loc[df_l2_cmp["date"] < cutoff, "y_pred"] = np.nan
+        l2_rmse = _rmse(df_l2_cmp["y_true"], df_l2_cmp["y_pred"])
+        l2_mae  = _mae(df_l2_cmp["y_true"], df_l2_cmp["y_pred"])
+        l2_mape = _mape(df_l2_cmp["y_true"], df_l2_cmp["y_pred"])
+        l2_ok = True
+    except Exception as e:
+        st.warning(f"소분류 결과 로드 실패: {e}")
+        l2_rmse = l2_mae = l2_mape = np.nan
+
+    # ----------------------------
+    # 4) 비교 표 + 시각화
+    # ----------------------------
+    comp = pd.DataFrame({
+        "Level": ["Total","대분류","소분류"],
+        "RMSE":  [total_rmse, l1_rmse, l2_rmse],
+        "MAE":   [total_mae,  l1_mae,  l2_mae],
+        "MAPE":  [total_mape, l1_mape, l2_mape],
+    })
+
+    c1, c2 = st.columns([2,1])
+    with c1:
+        if HAS_PLOTLY:
+            import plotly.express as px
+            comp_m = comp.melt(id_vars="Level", value_vars=["RMSE","MAE","MAPE"], var_name="Metric", value_name="Value")
+            fig_cmp = px.bar(comp_m, x="Level", y="Value", color="Metric", barmode="group",
+                             title="Total vs 대분류 vs 소분류 성능 비교")
+            st.plotly_chart(fig_cmp, use_container_width=True)
+        else:
+            st.bar_chart(comp.set_index("Level")[["RMSE","MAE","MAPE"]])
+
+    with c2:
+        st.markdown("**요약 지표**")
+        st.dataframe(comp.style.format({"RMSE":"{:.2f}","MAE":"{:.2f}","MAPE":"{:.1f}"}), use_container_width=True)
+with tabs[6]:
+    st.subheader("Final Insight")
+    st.markdown("""
+    **요약**
+    - **예측 반영 구간**: 실제 CCSI는 전체 기간을, 예측은 **2024-01 이후만** 반영했습니다.
+    - **분해 효과**: 단일 예측보다 **대분류/소분류 분해 후 합산**이 전반적으로 오차를 줄이는 경향을 보였습니다.  
+
+    **권장 해석 순서**
+    1) **Step 1**에서 전체 실제 vs 예측 추세와 잔차를 확인  
+    2) **Step 3**에서 9개 **대분류** 성능을 비교해 민감도가 큰 업종을 식별  
+    3) **Step 4**에서 해당 대분류의 **소분류**로 드릴다운해 패턴을 점검  
+    4) **Step 5**에서 **Total vs 대분류 vs 소분류**의 지표를 한 번에 비교
+
+    **향후 개선 포인트**
+    - **외생 변수**(금리·물가·고용) 보강 및 시차 최적화
+    - **명절/정책/프로모션** 더미와 이상치 처리 고도화
+    - 소분류별 **가중 합산 전략**(구성비 동적 추정) 도입
+    - 최신 월에 대한 **예측 캘리브레이션**(최근성 가중/선형 보정)
+
+    """)
