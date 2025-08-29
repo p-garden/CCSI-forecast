@@ -92,8 +92,8 @@ tabs = st.tabs([
     "Step 3: 대분류 예측",
     "Step 4: 소분류 예측",
     "Step 5: 성능 비교",
-    "Final Insight"
-])
+    "Outro: Final Insight"
+])  
 
 # --------------------------
 # Intro
@@ -912,7 +912,7 @@ with tabs[5]:
         st.markdown("**요약 지표**")
         st.dataframe(comp.style.format({"RMSE":"{:.2f}","MAE":"{:.2f}","MAPE":"{:.1f}"}), use_container_width=True)
 with tabs[6]:
-    st.subheader("Final Insight")
+    st.subheader("Outro: Final Insight")
     st.markdown("""
     **요약**
     - **예측 반영 구간**: 실제 CCSI는 전체 기간을, 예측은 **2024-01 이후만** 반영했습니다.
