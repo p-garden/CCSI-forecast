@@ -1,5 +1,12 @@
-# CCSI-forecast
-Forecasting consumer sentiment (CCSI) through time-series modeling and category-level card spending analysis.
+## Project Overview
 
-## Live App
-👉 [Open Dashboard](https://ccsi-forecast.streamlit.app/)
+이 프로젝트는 **소비자심리지수(CCSI)**를 카드 소비 데이터와 결합하여 예측하는 시계열 분석 프로젝트입니다.  
+- **데이터**: 경기도 일부 시의 카드 소비 데이터 + 통계청에서 제공하는 월별 CCSI  
+- **목표**: 지역 단위 소비 데이터를 활용해 국가적 소비 심리지표(CCSI)를 근사하고, 대·소분류 업종별 소비 패턴과의 관계를 분석  
+- **방법론**:
+  - 시계열 피처 엔지니어링 (Lag, Rolling Window, 계절성 반영)
+  - 대분류 및 소분류 업종별 카드 소비 데이터를 이용한 세분화된 분석
+- **결과**: 총합/대분류/소분류 단위의 예측 성능 비교 및 시각화를 통해 소비심리와 카드 소비의 상관성을 탐구
+
+## Demo Video
+[![Demo Video](https://youtu.be/wS2DuPhqEyk)](figs/demo.mov)
