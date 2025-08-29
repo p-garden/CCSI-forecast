@@ -9,4 +9,5 @@
 - **결과**: 총합/대분류/소분류 단위의 예측 성능 비교 및 시각화를 통해 소비심리와 카드 소비의 상관성을 탐구
 
 ## Demo Video
-[![Demo Video](https://youtu.be/wS2DuPhqEyk)](figs/demo.mov)
+
+[![Demo Video](https://img.youtube.com/vi/wS2DuPhqEyk/0.jpg)](https://youtu.be/wS2DuPhqEyk)
