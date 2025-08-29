@@ -69,7 +69,7 @@ def _load_category_csv(path: str) -> pd.DataFrame:
 # 페이지 세팅
 # --------------------------
 st.set_page_config(page_title="CCSI Storytelling Dashboard", page_icon="📈", layout="wide")
-st.title("📈 CCSI 예측 스토리텔링 대시보드")
+st.title("📈 CCSI 예측 대시보드")
 
 # --------------------------
 # 사이드바 (분석 설정)
@@ -87,7 +87,7 @@ results_path = "results/ccsi_total2.csv"
 # --------------------------
 tabs = st.tabs([
     "Intro",
-    "Step 1: 기존 CCSI 예측(데모 즉시 표시)",
+    "Step 1: 기존 CCSI 예측",
     "Step 2: 분해 접근(대/소분류)",
     "Step 3: 대분류 예측",
     "Step 4: 소분류 예측",
