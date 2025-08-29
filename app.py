@@ -228,6 +228,11 @@ with tabs[1]:
                 )
             )
             fig.update_xaxes(dtick="M1", tickformat="%Y-%m")
+            # 고정 Y-축 범위(75~120) 및 기준선/영역 음영
+            fig.update_yaxes(range=[75, 120])
+            fig.add_hrect(y0=100, y1=120, fillcolor="lightgreen", opacity=0.1, line_width=0)
+            fig.add_hrect(y0=75,  y1=100, fillcolor="lightcoral", opacity=0.1, line_width=0)
+            fig.add_hline(y=100, line_dash="dot", line_color="gray")
             st.plotly_chart(fig, use_container_width=True)
         else:
             # 폴백: 기본 라인차트 (커스텀 hover 불가)
@@ -443,6 +448,10 @@ with tabs[3]:
             )
         )
         fig_l1.update_xaxes(dtick="M1", tickformat="%Y-%m")
+        fig_l1.update_yaxes(range=[75, 120])
+        fig_l1.add_hrect(y0=100, y1=120, fillcolor="lightgreen", opacity=0.1, line_width=0)
+        fig_l1.add_hrect(y0=75,  y1=100, fillcolor="lightcoral", opacity=0.1, line_width=0)
+        fig_l1.add_hline(y=100, line_dash="dot", line_color="gray")
         st.plotly_chart(fig_l1, use_container_width=True)
     else:
         line_chart(plot_df_l1_m, x="date", y="value", color="series", title=f"[{pick}] Actual vs Pred (대분류)")
@@ -648,79 +657,137 @@ with tabs[4]:
     l2_candidates = L1_TO_L2.get(pick_l1, [])
     pick_l2 = st.selectbox("소분류 선택", l2_candidates)
 
+    import re
+    from difflib import get_close_matches
+
     # 데이터에서 해당 조합을 찾기 (시트 이름 기준으로 소분류 매칭)
     # 대분류 선택은 UI용이며, 실제 데이터 필터는 소분류(시트명)로만 수행
-    # sheet_name 형식 예: "소매/유통>건강/기호식품_RMSE3.80" 등
+    # sheet_name 형식 예: "소매/유통>건강/기호식품_RMSE3.75" 등
+
+    def _norm_k(s: str) -> str:
+        """소분류명 비교를 위한 정규화(구분자 통일):
+        - 좌우 공백 제거
+        - '대분류>소분류' 형태면 우측만 사용
+        - 뒤쪽 성능 접미사(_RMSE..., _MAE..., _MAPE...) 제거
+        - 괄호 내용 제거
+        - 모든 구분자(공백, '/', '／', '-', '·', '_', 콤마 등)를 **언더스코어('_')로 통일**
+        - 연속 언더스코어를 하나로 축약 후 좌우 언더스코어 제거
+        - 소문자화(영문 존재 시)
+        """
+        if s is None:
+            return ""
+        s = str(s)
+        # 대분류>소분류 형태 분해
+        if ">" in s:
+            s = s.split(">", 1)[1]
+        # 성능 접미사 제거 (언더스코어 여부 무관)
+        s = re.sub(r"_?RMSE.*$", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"_?MAE.*$",  "", s, flags=re.IGNORECASE)
+        s = re.sub(r"_?MAPE.*$", "", s, flags=re.IGNORECASE)
+        # 괄호 내용 제거
+        s = re.sub(r"\(.*?\)", "", s)
+        # 다양한 구분자 -> 언더스코어
+        s = re.sub(r"[\s／/·\-_,]+", "_", s)
+        # 연속 언더스코어 정리 및 트리밍
+        s = re.sub(r"_+", "_", s).strip("_")
+        return s.lower()
+
+    # 보조 컬럼 생성 (raw + norm)
     if "sheet_name" in df_l2.columns:
-        # 시트명에서 소분류명만 추출하여 보조 컬럼 생성
-        df_l2["__sheet_l2__"] = df_l2["sheet_name"].astype(str)
-        df_l2["__sheet_l2__"] = df_l2["__sheet_l2__"].str.split(">", n=1).str[-1]
-        # 뒤쪽 성능표기 접미사(예: _RMSE3.80, _MAE2.1 등) 제거
-        df_l2["__sheet_l2__"] = df_l2["__sheet_l2__"].str.replace(r"_.*$", "", regex=True).str.strip()
+        df_l2["__sheet_l2_raw__"]  = df_l2["sheet_name"].astype(str)
     else:
         # sheet_name이 없다면 category_l2를 사용 (가능한 경우)
         base_col = "category_l2" if "category_l2" in df_l2.columns else None
         if base_col is not None:
-            df_l2["__sheet_l2__"] = df_l2[base_col].astype(str)
+            df_l2["__sheet_l2_raw__"] = df_l2[base_col].astype(str)
         else:
-            df_l2["__sheet_l2__"] = ""
+            df_l2["__sheet_l2_raw__"] = ""
 
-    # 1차: 정규화된 소분류명과 정확히 일치하는 행 필터
-    sub_l2 = df_l2[df_l2["__sheet_l2__"] == str(pick_l2)].copy()
+    df_l2["__sheet_l2_norm__"] = df_l2["__sheet_l2_raw__"].map(_norm_k)
+    pick_norm = _norm_k(pick_l2)
 
-    # 2차 폴백: 시트명에 소분류 문자열이 포함되는 경우(대분류 무관)도 허용
-    if sub_l2.empty and ("sheet_name" in df_l2.columns):
-        mask = df_l2["sheet_name"].astype(str).str.contains(str(pick_l2), na=False)
-        sub_l2 = df_l2[mask].copy()
+    # 1차: 정규화된 소분류명과 정확히 일치하는 행
+    sub_l2 = df_l2[df_l2["__sheet_l2_norm__"] == pick_norm].copy()
+
+    # 2차: raw 텍스트에 소분류 포함(대분류 무관) 허용
+    if sub_l2.empty:
+        mask_contains = df_l2["__sheet_l2_raw__"].astype(str).str.contains(str(pick_l2), na=False)
+        sub_l2 = df_l2[mask_contains].copy()
+
+    # 3차: 정규화된 텍스트 포함 검색
+    if sub_l2.empty:
+        mask_contains2 = df_l2["__sheet_l2_norm__"].astype(str).str.contains(pick_norm, na=False)
+        sub_l2 = df_l2[mask_contains2].copy()
+
+    # 4차: 여전히 비어있으면 유사 후보 안내
+    if sub_l2.empty:
+        unique_norms = df_l2["__sheet_l2_raw__"].dropna().unique().tolist()
+        suggestions = get_close_matches(pick_l2, unique_norms, n=5, cutoff=0.5)
+        st.warning(
+            "선택한 소분류와 일치하는 시트를 찾지 못했습니다. "
+            + (f"가까운 후보: {', '.join(suggestions)}" if suggestions else "파일 내 시트명을 확인해주세요.")
+        )
 
     # 안전: 보조 컬럼은 이후 사용하지 않으므로 제거
-    if "__sheet_l2__" in df_l2.columns:
-        df_l2.drop(columns=["__sheet_l2__"], inplace=True)
+    for _c in ["__sheet_l2_raw__","__sheet_l2_norm__"]:
+        if _c in df_l2.columns:
+            df_l2.drop(columns=[_c], inplace=True)
 
     # 그래프/지표 표기용 제목
     display_title = f"[{pick_l1} > {pick_l2}]"
 
-    # 6) 선택 조합 성능 지표 (간단 버전, RMSE/MAE/MAPE만)
-    l2_rmse = _rmse(sub_l2["y_true"], sub_l2["y_pred"])
-    l2_mae  = _mae(sub_l2["y_true"], sub_l2["y_pred"])
-    l2_mape = _mape(sub_l2["y_true"], sub_l2["y_pred"])
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("RMSE", f"{l2_rmse:.2f}")
-    c2.metric("MAE", f"{l2_mae:.2f}")
-    c3.metric("MAPE(%)", f"{l2_mape:.1f}%")
-
-    # 7) 라인 차트 (실제 vs 예측) — 항상 표시 (SHOW_L2_CHARTS 플래그 제거)
-    sub_l2_agg = (
-        sub_l2.groupby("date", as_index=False)
-              .agg(y_true=("y_true","mean"), y_pred=("y_pred","mean"))
-              .sort_values("date")
-    )
-    plot_df_l2 = sub_l2_agg.rename(columns={"y_true":"Actual", "y_pred":"Pred"})[["date","Actual","Pred"]]
-    plot_df_l2_m = plot_df_l2.melt("date", var_name="series", value_name="value")
-
-    chart_title = f"{display_title} Actual vs Pred (소분류)"
-    if HAS_PLOTLY:
-        fig_l2 = px.line(plot_df_l2_m, x="date", y="value", color="series", title=chart_title)
-        fig_l2.update_traces(mode="lines+markers")
-        fig_l2.for_each_trace(
-            lambda tr: tr.update(line=dict(color="blue")) if tr.name == "Actual" else tr.update(line=dict(color="red"))
-        )
-        merged_l2 = sub_l2_agg.rename(columns={"y_true":"Actual","y_pred":"Pred"}).copy()
-        merged_l2["error"] = merged_l2["Pred"] - merged_l2["Actual"]
-        fig_l2.for_each_trace(
-            lambda tr: tr.update(
-                customdata=merged_l2[["error"]].values,
-                hovertemplate=("실제:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
-            ) if tr.name == "Actual" else tr.update(
-                customdata=merged_l2[["error"]].values,
-                hovertemplate=("예측:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
-            )
-        )
-        fig_l2.update_xaxes(dtick="M1", tickformat="%Y-%m")
-        st.plotly_chart(fig_l2, use_container_width=True)
+    if sub_l2.empty:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("RMSE", "—")
+        c2.metric("MAE", "—")
+        c3.metric("MAPE(%)", "—")
+        st.info(f"{display_title} 에 해당하는 데이터가 없습니다.")
     else:
-        line_chart(plot_df_l2_m, x="date", y="value", color="series", title=chart_title)
+        # 6) 선택 조합 성능 지표 (간단 버전, RMSE/MAE/MAPE만)
+        l2_rmse = _rmse(sub_l2["y_true"], sub_l2["y_pred"])
+        l2_mae  = _mae(sub_l2["y_true"], sub_l2["y_pred"])
+        l2_mape = _mape(sub_l2["y_true"], sub_l2["y_pred"])
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("RMSE", f"{l2_rmse:.2f}")
+        c2.metric("MAE", f"{l2_mae:.2f}")
+        c3.metric("MAPE(%)", f"{l2_mape:.1f}%")
+
+        # 7) 라인 차트 (실제 vs 예측)
+        sub_l2_agg = (
+            sub_l2.groupby("date", as_index=False)
+                  .agg(y_true=("y_true","mean"), y_pred=("y_pred","mean"))
+                  .sort_values("date")
+        )
+        plot_df_l2 = sub_l2_agg.rename(columns={"y_true":"Actual", "y_pred":"Pred"})[["date","Actual","Pred"]]
+        plot_df_l2_m = plot_df_l2.melt("date", var_name="series", value_name="value")
+
+        chart_title = f"{display_title} Actual vs Pred (소분류)"
+        if HAS_PLOTLY:
+            fig_l2 = px.line(plot_df_l2_m, x="date", y="value", color="series", title=chart_title)
+            fig_l2.update_traces(mode="lines+markers")
+            fig_l2.for_each_trace(
+                lambda tr: tr.update(line=dict(color="blue")) if tr.name == "Actual" else tr.update(line=dict(color="red"))
+            )
+            merged_l2 = sub_l2_agg.rename(columns={"y_true":"Actual","y_pred":"Pred"}).copy()
+            merged_l2["error"] = merged_l2["Pred"] - merged_l2["Actual"]
+            fig_l2.for_each_trace(
+                lambda tr: tr.update(
+                    customdata=merged_l2[["error"]].values,
+                    hovertemplate=("실제:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
+                ) if tr.name == "Actual" else tr.update(
+                    customdata=merged_l2[["error"]].values,
+                    hovertemplate=("예측:<br>%{y:.2f}<br>오차: %{customdata[0]:.2f}<br>날짜: %{x|%Y-%m}")
+                )
+            )
+            fig_l2.update_xaxes(dtick="M1", tickformat="%Y-%m")
+            fig_l2.update_yaxes(range=[75, 120])
+            fig_l2.add_hrect(y0=100, y1=120, fillcolor="lightgreen", opacity=0.1, line_width=0)
+            fig_l2.add_hrect(y0=75,  y1=100, fillcolor="lightcoral", opacity=0.1, line_width=0)
+            fig_l2.add_hline(y=100, line_dash="dot", line_color="gray")
+            st.plotly_chart(fig_l2, use_container_width=True)
+        else:
+            line_chart(plot_df_l2_m, x="date", y="value", color="series", title=chart_title)
 
     st.divider()
 
